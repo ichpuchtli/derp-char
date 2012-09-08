@@ -13,6 +13,7 @@ Manual
     sudo rmmod crypto  
 
 Automaic  
+
     sudo ./probe.sh   
 
 Use
