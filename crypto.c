@@ -11,7 +11,7 @@
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Samuel Macpherson/Douglas Pukallus");
-MODULE_DESCRIPTION("Crypto Device Driver Module");
+MODULE_DESCRIPTION("Crypto Device Driver");
 
 #define CRYPTO_MAJOR 250
 #define CRYPTO_MINOR 0
@@ -23,10 +23,11 @@ MODULE_DESCRIPTION("Crypto Device Driver Module");
 
 //// Global Variables /////////////////////////////////////////////////////////
 static dev_t dev_num;
-struct cdev cdev_st;
-static char* buffer_front = NULL;
-static char* buffer_end = NULL;
-static char* read_pointer = NULL;
+static struct cdev cdev_st;
+
+static char* buffer_front  = NULL;
+static char* buffer_end    = NULL;
+static char* read_pointer  = NULL;
 static char* write_pointer = NULL;
 
 //// File Operation Prototypes ////////////////////////////////////////////////
@@ -75,7 +76,7 @@ int __init init_module(void)
     cdev_init(&cdev_st, &fops);
     cdev_st.owner = THIS_MODULE;
 
-    //Device is active after this point!
+    // Device is active after this point!
     (void) cdev_add(&cdev_st, dev_num, 1);
 
     printk(KERN_INFO CRYPTO_NAME": major=%d, minor=%d\n", MAJOR(dev_num), MINOR(dev_num) );
@@ -149,7 +150,7 @@ static ssize_t crypto_write(struct file *filp, const char *buf, size_t len,
     minimum = MIN(len, buffer_space);
 
     if( minimum == 0 ) {
-        // not enough buffer space, wait for read pointer to catch up
+        // buffer full, wait for read pointer to catch up
         return -EINVAL;
     }
 

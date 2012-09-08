@@ -6,13 +6,13 @@ mode="664"
 major=250
 
 # Make and exit if unsuccessful
-make > /dev/null || exit 2
+make > /dev/null || exit 1
 
 # Check if module is still loaded and attempt to remove it
 (lsmod | grep crypto > /dev/null) && rmmod $module
 
 # Install module
-insmod ./$module.ko $* || exit 1
+insmod ./$module.ko $* || exit 2
 
 # Don't need object files any more
 make clean
@@ -27,5 +27,5 @@ mknod /dev/${device} c $major 0
 chgrp comp3301 /dev/crypto
 chmod $mode /dev/crypto
 
-# Check dmesg
+# Acknowledge with dmesg
 dmesg | tail -1
