@@ -8,11 +8,12 @@ Install
 
 Manual  
 
-    make; sudo insmod ./crypto.ko  
+    make  
+    sudo insmod ./crypto.ko  
     ...  
     sudo rmmod crypto  
 
-Automaic  
+Automatic  
 
     sudo ./probe.sh   
 
