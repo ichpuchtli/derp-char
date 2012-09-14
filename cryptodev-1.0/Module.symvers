@@ -1,0 +1,2 @@
+0x5f244f83	cryptodev_init	/home/comp3301/comp3301-cryptodev/cryptodev	EXPORT_SYMBOL
+0xfc848e72	cryptodev_docrypt	/home/comp3301/comp3301-cryptodev/cryptodev	EXPORT_SYMBOL
