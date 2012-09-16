@@ -5,12 +5,20 @@
 #include <linux/module.h>	/* required for every module */
 #include <linux/fs.h>		/* register_chrdev_region */
 #include <linux/slab.h>		/* kmalloc, kfree, ... */
+#include <linux/semaphore.h>
+#include <linux/list.h>		/* kmalloc, kfree, ... */
 
 #include <asm/uaccess.h>	/* copy_*_user */
 
 #include "ioctl.h"
+#include "cryptodev-1.0/cryptoapi.h"
 
+/* user min(a, b) instead defined in /kernal.h */
 #define MIN(A, B)  (((A) < (B)) ? (A) : (B))
+
+#define IS_WRITER(FLAGS) ( (FLAGS & O_WRONLY) || (FLAGS & O_RDWR) )
+#define IS_READER(FLAGS) ( (FLAGS & O_RDONLY) || (FLAGS & O_RDWR) )
+#define IS_RDWR(FLAGS)   ( FLAGS & O_RDWR )
 
 extern const struct file_operations fops;
 

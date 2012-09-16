@@ -1,27 +1,34 @@
-INDENT = -kr -i8 -l79 -lc79
+# Makefile: echat test program
+# Author: Samuel Macpherson/Douglas Pukallus
 
-obj-m += crypto.o
-crypto-objs := crypto-ops.o crypto-mod.o
+TARGET=echat
+SOURCE=echat.c
 
-MOD_DIR=/lib/modules/$(shell uname -r)/build
+CFLAGS=-lpthread -g --std=gnu99 -pedantic -Wall
 
-.PHONY: all
-all: 
-	@make -C $(MOD_DIR) M=$(PWD) modules
+# consider clang for development but make sure it compiles in gcc as well
+# uncomment to use clang as the compiler
+#CC=clang
 
-.PHONY: clean
+INDENT = -kr -i8 -l78 -lc79
+
+all: $(TARGET)
+
+$(TARGET) : $(SOURCE) 
+	$(CC) $(CFLAGS) -o $@ $<
+
 clean: 
-	@make -C $(MOD_DIR) M=$(PWD) clean
-	rm -f _*
+	rm -f $(TARGET) _*
 
+# Needs dos2unix to convert windows line endings to linux line endings
+# sudo apt-get install dos2unix
 indent:
-	dos2unix crypto-*
-	indent $(INDENT) crypto-mod.c -o _crypto-mod.c
-	indent $(INDENT) crypto-ops.c -o _crypto-ops.c
-	indent $(INDENT) crypto-ops.h -o _crypto-ops.h
+	dos2unix echat.c
+	indent $(INDENT) echat.c -o _echat.c
 
+# replace echat.c indent'ed version 
 merge: indent
-	rename -f 's/^_//' _crypto-*	
+	rename -f 's/^_//' _*
 
 check: merge
-	perl checkpatch-0.32.pl --no-tree --no-signoff -f --no-summary crypto-*
+	perl ../checkpatch-0.32.pl --no-tree --no-signoff -f --no-summary echat.c 
