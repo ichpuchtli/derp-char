@@ -1,42 +1,93 @@
 #include "crypto-ops.h"
 
+/* Internal Macro's */
+/*****************************************************************************/
+#define IS_WRITER(FLAGS) ( (FLAGS & O_WRONLY) || (FLAGS & O_RDWR) )
+#define IS_READER(FLAGS) ( (FLAGS & O_RDONLY) || (FLAGS & O_RDWR) )
+#define IS_RDWR(FLAGS)   ( FLAGS & O_RDWR )
+
+#define BUFFER_SIZE (1 << 13)
+
+#ifdef DEBUG
+#define DUBUG(...) printk(KERN_WARNING "crypto: " __VA_ARGS__)
+#else
+#define DUBUG(...)
+#endif
 
 /* Internal Functions */
+/*****************************************************************************/
 static int create_buffer(void);
-static int delete_buffer(struct file* filp, unsigned int buffer_id);
-static int attach_buffer(struct file* filp, unsigned int buffer_id);
-static int detach_buffer(struct file* filp);
-static int set_crypto_mode(struct file* filp, unsigned long arg);
+static int delete_buffer(struct file *filp, unsigned int buffer_id);
+static int attach_buffer(struct file *filp, unsigned int buffer_id);
+static int detach_buffer(struct file *filp);
+static int set_crypto_mode(struct file *filp, unsigned long arg);
+static int create_handle(struct file *filp);
+static void free_buffer(CryptoBuffer * buff);
+static void free_handle(struct file *filp);
 
 
 /* Globals */
+/*****************************************************************************/
 static struct list_head DEVICE_BUFFERS;
 static unsigned int BUFFER_COUNT;
 
+static void free_handle(struct file *filp)
+{
 
-struct CryptoHandle {
-	
-	struct list_head node;
-	struct crypto_smode mode;
-	struct file* handle;
-	struct BufferState* buff; 
-};
+	CryptoHandle *handle = (CryptoHandle *) filp->private_data;
 
-struct BufferState {
 
-        struct list_head node;
-        struct file* reader; /* TODO struct CryptoHandle */
-	struct file* writer;
-	struct crypto_smode mode;
-	struct semaphore sem;
-        char* start;
-	char* end;
-	char* rp;
-	char* wp;
-        unsigned int id;
-	unsigned int refcount;
+	/* free structure */
+	kfree((void *) handle);
 
-};
+}
+
+static void free_buffer(CryptoBuffer * buff)
+{
+
+	DUBUG("free buffer -> %d \n", buff->id);
+
+	/* remove from buffer list */
+	list_del((struct list_head *) buff);
+
+	BUFFER_COUNT--;
+
+	/* free buffer */
+	kfree(buff->buffer);
+
+	/* lastly free the structure */
+	kfree((void *) buff);
+
+}
+
+static int create_handle(struct file *filp)
+{
+
+	CryptoHandle *handle;
+
+	/* file structure is already opened */
+	if (filp->private_data != NULL) {
+		return -EFAULT;
+	}
+
+	/* allocate structure */
+	handle = (CryptoHandle *) kmalloc(sizeof(CryptoHandle), GFP_KERNEL);
+
+	if (handle == (void *) NULL) {
+		DUBUG("kmalloc returned zero!\n");
+		return -ENOMEM;
+	}
+
+	/* initialize mode */
+	/* memset(handle->mode, 0xFF, sizeof(struct crypto_smode)); */
+
+	handle->buff = NULL;
+
+	filp->private_data = (void *) handle;
+
+	return 0;
+
+}
 
 /* Create a buffer and return its identifier. This call takes no arguments.
  *
@@ -48,42 +99,44 @@ struct BufferState {
  *     >0 on success (buffer id)
  *     -ENOMEM if no memory was available to satisfy the request
  */
-static int create_buffer(void){
+static int create_buffer(void)
+{
 
-	struct BufferState* buffstate;
+	CryptoBuffer *buffstate;
 
 	/* allocate the "BufferState Structure */
-	buffstate = kmalloc(sizeof(struct BufferState), GFP_KERNEL);
+	buffstate = kmalloc(sizeof(CryptoBuffer), GFP_KERNEL);
 
 	if (buffstate == (void *) NULL) {
-		printk(KERN_WARNING "crypto: kmalloc returned zero!\n");
+		DUBUG("kmalloc returned zero!\n");
 		return -ENOMEM;
 	}
 
 	/* add buffer to list of buffers */
-	list_add((struct list_head*) buffstate, &DEVICE_BUFFERS);	
+	list_add((struct list_head *) buffstate, &DEVICE_BUFFERS);
 
 	/* null reader/writer field */
-	buffstate->reader = (struct file*) NULL;	
-	buffstate->writer = (struct file*) NULL;	
+	buffstate->reader = (struct file *) NULL;
+	buffstate->writer = (struct file *) NULL;
 
 	/* initialize semaphore */
 	sema_init(&buffstate->sem, 1);
 
 	/* allocate the buffer and map pointers */
-	buffstate->start = kmalloc(8192,GFP_KERNEL);
+	buffstate->buffer = kmalloc(BUFFER_SIZE, GFP_KERNEL);
 
-	if (buffstate->start == (void *) NULL) {
-		printk(KERN_WARNING "crypto: kmalloc returned zero!\n");
+	if (buffstate->buffer == (void *) NULL) {
+		DUBUG("kmalloc returned zero!\n");
+
 		return -ENOMEM;
 	}
 
-	buffstate->end = (char*) ((unsigned long) buffstate->start + 8192UL);
-
-	buffstate->rp = buffstate->wp = buffstate->start;
+	buffstate->rp = buffstate->wp = (char *) buffstate->buffer;
 
 	/* unique buffer id based on index into DEVICE_BUFFERS */
 	buffstate->id = ++BUFFER_COUNT;
+
+	DUBUG("buffer id:%d created!\n", BUFFER_COUNT);
 
 	/* No one using buffer yet but add one so it's not thrown out */
 	buffstate->refcount = 0;
@@ -91,6 +144,7 @@ static int create_buffer(void){
 	return buffstate->id;
 
 }
+
 /* Deletes a buffer identified by the integer argument given.
  *
  * Example (where fd is an open file descriptor to the device): 
@@ -106,19 +160,21 @@ static int create_buffer(void){
  *         should succeed)
  *     -ENOMEM if no memory was available to satisfy the request
  */
-static int delete_buffer(struct file* filp, unsigned int buffer_id){
+static int delete_buffer(struct file *filp, unsigned int buffer_id)
+{
 
 
 	/* walk through buffer list find appropriate buffer */
-	struct list_head* curr = &DEVICE_BUFFERS;
-	struct BufferState* buff = NULL;
+	struct list_head *curr = &DEVICE_BUFFERS;
+	CryptoBuffer *buff = NULL;
+	CryptoHandle *handle = (CryptoHandle *) filp->private_data;
 
-	while( (curr = curr->next) != &DEVICE_BUFFERS){
-	
-		if( ((struct BufferState*) curr)->id == buffer_id ){
+	while ((curr = curr->next) != &DEVICE_BUFFERS) {
 
-			buff = (struct BufferState*) curr;
-		
+		if (((CryptoBuffer *) curr)->id == buffer_id) {
+
+			buff = (CryptoBuffer *) curr;
+
 			break;
 
 		}
@@ -126,23 +182,30 @@ static int delete_buffer(struct file* filp, unsigned int buffer_id){
 	}
 
 	/* the buffer specified does not exist */
-	if(buff == NULL){
+	if (buff == NULL) {
 		return -EINVAL;
 	}
-	
-	/* down sem */
 
-	/* buffer is not an open descriptor to the target */ 
-	if( buff != (struct BufferState*) filp->private_data){
-		return -EINVAL;
+	/* down sem */
+	(void) down_interruptible(&buff->sem);
+
+	if (buff->refcount == 1) {
+
+		/* this handle is not attached to this buffer */
+		if (handle->buff != buff) {
+			return -EOPNOTSUPP;
+		}
+
+		(void) detach_buffer(filp);
+
 	}
 
 	/* the buffer has another handle attached to it */
-	if( buff->refcount > 1){
-		return -EOPNOTSUPP;	
+	if (buff->refcount > 1) {
+		return -EOPNOTSUPP;
 	}
 
-	/* free buffer */
+	free_buffer(buff);
 
 	return 0;
 
@@ -155,77 +218,81 @@ static int delete_buffer(struct file* filp, unsigned int buffer_id){
  *     -EALREADY if there is already a reader or writer attached
  *     -ENOMEM if no memory was available to satisfy the request
  */
-static int attach_buffer(struct file* filp, unsigned int buffer_id){
+static int attach_buffer(struct file *filp, unsigned int buffer_id)
+{
 
-	struct list_head* curr = &DEVICE_BUFFERS;
-	struct BufferState* buff = NULL;
+	struct list_head *curr = &DEVICE_BUFFERS;
+	CryptoHandle *handle = (CryptoHandle *) filp->private_data;
+	CryptoBuffer *buff = NULL;
 
 	/* down sem */
+	(void) down_interruptible(&buff->sem);
 
 	/* the fd is already attached to a buffer */
-	if( filp->private_data != NULL){
-		return -EOPNOTSUPP;		
+	if (handle->buff != NULL) {
+		return -EOPNOTSUPP;
 	}
 
 	/* walk through buffer list find appropriate buffer */
 
-	while( (curr = curr->next) != &DEVICE_BUFFERS){
-	
-		if( ((struct BufferState*) curr)->id == buffer_id ){
+	while ((curr = curr->next) != &DEVICE_BUFFERS) {
 
-			buff = (struct BufferState*) curr;
+		if (((CryptoBuffer *) curr)->id == buffer_id) {
+
+			buff = (CryptoBuffer *) curr;
 			break;
 		}
 	}
 
 	/* the buffer specified does not exist */
-	if(buff == NULL){
+	if (buff == NULL) {
 		return -EINVAL;
 	}
 
-	if( IS_WRITER(filp->f_flags) ){
-		
-		/* there is already a reader|writer attached */
-		if( buff->writer ){
-			return -EALREADY;
-		}
+	if (IS_WRITER(filp->f_flags)) {
 
-		buff->writer = filp;	
-
-	}else if( IS_READER(filp->f_flags) ){
-		
-		/* there is already a reader|writer attached */
-		if( buff->reader ){
-			return -EALREADY;
-		}
-
-		buff->reader = filp;	
-
-	}else if( IS_RDWR(filp->f_flags) ){
-
-		/* there is already a reader|writer attached */
-		if( buff->writer ){
+		/* there is already a writer attached */
+		if (buff->writer) {
 			return -EALREADY;
 		}
 
 		buff->writer = filp;
+		buff->refcount++;
 
-		/* there is already a reader|writer attached */
-		if( buff->reader ){
+	} else if (IS_READER(filp->f_flags)) {
+
+		/* there is already a reader attached */
+		if (buff->reader) {
 			return -EALREADY;
 		}
 
 		buff->reader = filp;
+		buff->refcount++;
 
-	}else{
-		/* assume this case never happens */
+	} else if (IS_RDWR(filp->f_flags)) {
+
+		/* there is already a reader|writer attached */
+		if (buff->writer) {
+			return -EALREADY;
+		}
+
+		buff->writer = filp;
+		buff->refcount++;
+
+		/* there is already a reader|writer attached */
+		if (buff->reader) {
+			return -EALREADY;
+		}
+
+		buff->reader = filp;
+		buff->refcount++;
+
 	}
 
-	filp->private_data = (void*) buff;
-
-	buff->refcount++;
+	handle->buff = buff;
 
 	/* up sem */
+	up(&buff->sem);
 
 	return 0;
 }
@@ -243,38 +310,41 @@ static int attach_buffer(struct file* filp, unsigned int buffer_id){
  *     -ENOMEM if no memory was available to satisfy the request
  */
 
-static int detach_buffer(struct file* filp){
+static int detach_buffer(struct file *filp)
+{
 
-
-	struct BufferState* buff;
+	CryptoHandle *handle = (CryptoHandle *) filp->private_data;
+	CryptoBuffer *buff = handle->buff;
 
 	/* down sem */
+	(void) down_interruptible(&buff->sem);
 
-	buff = (struct BufferState*) filp->private_data;
-
-	/* the fd is not attached to any buffer */
-	if( buff == NULL){
+	/* the handle is not attached to any buffer */
+	if (buff == NULL) {
 		return -EOPNOTSUPP;
 	}
 
-	if( buff->reader == filp){
+	if (buff->reader == filp) {
 		buff->reader = NULL;
 		buff->refcount--;
 	}
 
-	if( buff->writer == filp){
+	if (buff->writer == filp) {
 		buff->writer = NULL;
 		buff->refcount--;
 	}
 
+	handle->buff = NULL;
 
-	if(buff->refcount == 0){
-		/* free buffer */
+	if (buff->refcount <= 0) {
+
+		free_buffer(buff);
+
+		return 0;
 	}
 
-	filp->private_data = NULL;
-
 	/* up sem */
+	up(&buff->sem);
 
 	return 0;
 
@@ -307,60 +377,44 @@ static int detach_buffer(struct file* filp){
  *     -EFAULT if the pointer given is outside the address space of the
  *              user process
  */
-static int set_crypto_mode(struct file* filp, unsigned long arg){
+static int set_crypto_mode(struct file *filp, unsigned long arg)
+{
 
 
 	struct crypto_smode mode;
+	CryptoHandle *handle = (CryptoHandle *) filp->private_data;
 	unsigned int count = 0;
-	struct BufferState* buff;
 
-	if( copy_from_user(&mode, (void*) arg, sizeof(struct crypto_smode))){
+	if (handle == NULL) {
+		/* should never happen need fd to call function anyway */
+	}
+
+	if (copy_from_user(&mode, (void *) arg, sizeof(struct crypto_smode))) {
 		return -EFAULT;
 	}
 
-	if( mode.dir != CRYPTO_READ || mode.dir != CRYPTO_WRITE){
+	if (mode.dir != CRYPTO_READ || mode.dir != CRYPTO_WRITE) {
 
-		/* integrety error */
+		/* integrity error */
 	}
 
-	if(mode.mode != CRYPTO_DEC || mode.mode != CRYPTO_ENC || mode.mode
-			!= CRYPTO_PASSTHROUGH ){
+	if (mode.mode != CRYPTO_DEC || mode.mode != CRYPTO_ENC || mode.mode
+	    != CRYPTO_PASSTHROUGH) {
 
-		/* integrety error */
+		/* integrity error */
 	}
 
-
-	while( mode.key[count] != '\0' && count < 255 ) { count++; }
-
-	/* error key is not null terminated */	
-	if( mode.key[count] != '\0' ){ }
-
-	buff = (struct BufferState*) filp->private_data;
-
-	/* TODO See IOCTL description: The fd does not have to be attached to
-	 * a buffer for this call to work, since the encryption mode is a
-	 * property of the file descriptor, not a buffer.
-	 * Note: current implementation does not distinguish between buffer and
-	 * file descriptor. May require something similar to the illustration
-	 * below.
-	 * 
-	 * File                 -> CryptoHandle -> BufferState
-	 *
-	 * ----------------        --------        ------------
-	 * | private_data-|------->| mode |        | sem      |
-	 * | ...          |        | buff-|------->| rp,wp    |
-	 * | ...          |        --------        | start    |
-	 * ----------------                        | end      |
-	 *                                         | id       |
-	 *                                         | refcount |
-	 *                                         ------------
-	 */
-
-	if( buff == NULL){ 
-		return -EFAULT;	
+	while (mode.key[count] != '\0' && count < 255) {
+		count++;
 	}
 
-	buff->mode = mode;
+	if (mode.key[count] != '\0') {
+
+		/* integrity error */
+		/* error key is not null terminated */
+	}
+
+	handle->mode = mode;
 
 	return 0;
 
@@ -372,7 +426,8 @@ int crypto_open(struct inode *inode, struct file *filp)
 	try_module_get(THIS_MODULE);
 
 	/* check user has the permission they are requesting */
-	return 0;
+
+	return create_handle(filp);
 }
 
 int crypto_release(struct inode *inode, struct file *filp)
@@ -382,37 +437,88 @@ int crypto_release(struct inode *inode, struct file *filp)
 
 	/* detach_buffer */
 
+	(void) detach_buffer(filp);
+
+	/* free handle */
+	free_handle(filp);
+
 	return 0;
 }
 
 ssize_t crypto_read(struct file * filp, char *buf, size_t len, loff_t * off)
 {
 
+	CryptoHandle *handle = (CryptoHandle *) filp->private_data;
+	CryptoBuffer *buff = handle->buff;
+	struct crypto_smode crypto_enc;
+	struct cryptodev_state crypto_state;
+	ssize_t minimum;
+
 	/* down sem */
+	(void) down_interruptible(&buff->sem);
+
+	crypto_enc = handle->mode;
+
+	minimum = min(len, (size_t) (buff->wp - buff->rp));
+
+	cryptodev_init(&crypto_state, crypto_enc.key, strlen(crypto_enc.key));
 
 	/* check filp is a reader */
+	if (buff->reader != filp) {
 
-	/* check mode for encryption */
+	}
 
-	/* do crypt and copy to user space */
+	switch (crypto_enc.mode) {
 
-	/* update read/write pointers */
-	
+	case CRYPTO_READ:
+
+	case CRYPTO_WRITE:
+
+	default:
+		break;
+
+	}
+
+	switch (crypto_enc.dir) {
+
+	case CRYPTO_ENC:
+
+	case CRYPTO_DEC:
+
+	case CRYPTO_PASSTHROUGH:
+
+	default:
+		break;
+
+	}
+
+	if (copy_to_user(buf, buff->rp, minimum)) {
+		/* error not all data copied */
+	}
+
+	/* TODO implement circular buffer */
+	buff->rp += minimum;
+
 	/* up sem */
+	up(&buff->sem);
 
-	return 0;
+	return minimum;
 }
 
 ssize_t crypto_write(struct file * filp, const char *buf, size_t len,
 		     loff_t * off)
 {
-	
+
+	CryptoHandle *handle = (CryptoHandle *) filp->private_data;
+	CryptoBuffer *buff = handle->buff;
+
 	/* down sem */
-	
+	(void) down_interruptible(&buff->sem);
+
 	/* check filp for attached buffer */
 
 	/* check filp is a writer */
-	
+
 	/* check mode for encryption */
 
 	/* copy from user space and do crypt */
@@ -420,6 +526,7 @@ ssize_t crypto_write(struct file * filp, const char *buf, size_t len,
 	/* update read/write pointers */
 
 	/* up sem */
+	up(&buff->sem);
 
 	return 0;
 }
@@ -430,34 +537,30 @@ int crypto_ioctl(struct inode *inode, struct file *filp, unsigned int cmd,
 		 unsigned long arg)
 {
 
-	switch (cmd)
-	{
+	switch (cmd) {
 
-		case CRYPTO_IOCCREATE:
+	case CRYPTO_IOCCREATE:
 
-			return create_buffer();
+		return create_buffer();
 
-		case CRYPTO_IOCTDELETE:
-			
-			return delete_buffer(filp, (unsigned int) arg);
+	case CRYPTO_IOCTDELETE:
 
-		case CRYPTO_IOCTATTACH:
+		return delete_buffer(filp, (unsigned int) arg);
 
-			/* check permissions */
-			/* i.e filp perm >= inode perm */	
+	case CRYPTO_IOCTATTACH:
 
-			return attach_buffer(filp,(unsigned int) arg);
+		return attach_buffer(filp, (unsigned int) arg);
 
-		case CRYPTO_IOCDETACH:
+	case CRYPTO_IOCDETACH:
 
-			return detach_buffer(filp);
+		return detach_buffer(filp);
 
-		case CRYPTO_IOCSMODE:
+	case CRYPTO_IOCSMODE:
 
-			return set_crypto_mode(filp, arg); 
+		return set_crypto_mode(filp, arg);
 
 	}
-   
+
 	/* should never reach here */
 	return -ENOTTY;
 }
@@ -472,12 +575,18 @@ void init_file_ops(void)
 	/* Initialize Linked List of Buffers */
 	INIT_LIST_HEAD(&DEVICE_BUFFERS);
 	BUFFER_COUNT = 0;
+
 }
 
 void exit_file_ops(void)
 {
-	/* Free all buffers */
-        return;
+
+	if (BUFFER_COUNT != 0) {
+		DUBUG("buffer_count -> %d \n", BUFFER_COUNT);
+		/* error possible memory leak */
+	}
+
+	return;
 }
 
 const struct file_operations fops = {
@@ -488,4 +597,3 @@ const struct file_operations fops = {
 	.ioctl = crypto_ioctl,
 	.mmap = crypto_mmap,
 };
-

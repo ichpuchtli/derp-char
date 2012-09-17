@@ -7,6 +7,7 @@ MOD_DIR=/lib/modules/$(shell uname -r)/build
 
 .PHONY: all
 all: 
+	cp cryptodev-1.0/Module.symvers .
 	@make -C $(MOD_DIR) M=$(PWD) modules
 
 .PHONY: clean

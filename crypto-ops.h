@@ -1,11 +1,11 @@
 #ifndef _CRYPTO_OPS_H_
 #define _CRYPTO_OPS_H_
 
-#include <linux/kernel.h>	/* KERN_INFO, printk() */
+#include <linux/kernel.h>	/* KERN_INFO, printk(), min */
 #include <linux/module.h>	/* required for every module */
 #include <linux/fs.h>		/* register_chrdev_region */
 #include <linux/slab.h>		/* kmalloc, kfree, ... */
-#include <linux/semaphore.h>
+#include <linux/semaphore.h>	/* sema_init(), up(), down() */
 #include <linux/list.h>		/* kmalloc, kfree, ... */
 
 #include <asm/uaccess.h>	/* copy_*_user */
@@ -13,14 +13,43 @@
 #include "ioctl.h"
 #include "cryptodev-1.0/cryptoapi.h"
 
-/* user min(a, b) instead defined in /kernal.h */
-#define MIN(A, B)  (((A) < (B)) ? (A) : (B))
-
-#define IS_WRITER(FLAGS) ( (FLAGS & O_WRONLY) || (FLAGS & O_RDWR) )
-#define IS_READER(FLAGS) ( (FLAGS & O_RDONLY) || (FLAGS & O_RDWR) )
-#define IS_RDWR(FLAGS)   ( FLAGS & O_RDWR )
-
 extern const struct file_operations fops;
+
+struct BufferState {
+
+	struct list_head node;
+	struct file *reader;
+	struct file *writer;
+	struct semaphore sem;
+	const char *buffer;
+	char *rp;		/* tail in circular buffer terms */
+	char *wp;		/* head in circular buffer terms */
+	unsigned int id;
+	volatile unsigned int refcount;
+
+};
+
+struct HandleState {
+
+	struct crypto_smode mode;
+	struct BufferState *buff;
+};
+
+/*
+ * File                 -> CryptoHandle -> CryptoBuffer
+ * ----------------        --------        ------------
+ * | private_data-|------->| mode |        | sem      |
+ * | ...          |        | buff-|------->| rp,wp    |
+ * | ...          |        --------        | buffer   |
+ * ----------------                        | reader   |
+ *                                         | id       |
+ *                                         | refcount |
+ *                                         ------------
+ */
+
+
+typedef struct BufferState CryptoBuffer;
+typedef struct HandleState CryptoHandle;
 
 int crypto_open(struct inode *inode, struct file *filp);
 int crypto_release(struct inode *inode, struct file *filp);
