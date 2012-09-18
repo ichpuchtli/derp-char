@@ -6,7 +6,7 @@
 #define IS_READER(FLAGS) ( (FLAGS & O_RDONLY) || (FLAGS & O_RDWR) )
 #define IS_RDWR(FLAGS)   ( FLAGS & O_RDWR )
 
-#define BUFFER_SIZE (1 << 13)
+#define BUFFSIZE (1 << 13)
 
 #ifdef DEBUG
 #define DUBUG(...) printk(KERN_WARNING "crypto: " __VA_ARGS__)
@@ -36,7 +36,6 @@ static void free_handle(struct file *filp)
 
 	CryptoHandle *handle = (CryptoHandle *) filp->private_data;
 
-
 	/* free structure */
 	kfree((void *) handle);
 
@@ -53,7 +52,7 @@ static void free_buffer(CryptoBuffer * buff)
 	BUFFER_COUNT--;
 
 	/* free buffer */
-	kfree(buff->buffer);
+	kfree(buff->start);
 
 	/* lastly free the structure */
 	kfree((void *) buff);
@@ -79,7 +78,7 @@ static int create_handle(struct file *filp)
 	}
 
 	/* initialize mode */
-	/* memset(handle->mode, 0xFF, sizeof(struct crypto_smode)); */
+	/* memset(handle->enc_st, 0xFF, sizeof(struct crypto_smode)); */
 
 	handle->buff = NULL;
 
@@ -112,8 +111,10 @@ static int create_buffer(void)
 		return -ENOMEM;
 	}
 
+	/* TODO down list sem */
 	/* add buffer to list of buffers */
 	list_add((struct list_head *) buffstate, &DEVICE_BUFFERS);
+	/* up list sem */
 
 	/* null reader/writer field */
 	buffstate->reader = (struct file *) NULL;
@@ -123,15 +124,15 @@ static int create_buffer(void)
 	sema_init(&buffstate->sem, 1);
 
 	/* allocate the buffer and map pointers */
-	buffstate->buffer = kmalloc(BUFFER_SIZE, GFP_KERNEL);
+	buffstate->start = kmalloc(BUFFSIZE, GFP_KERNEL);
 
-	if (buffstate->buffer == (void *) NULL) {
+	if (buffstate->start == (void *) NULL) {
 		DUBUG("kmalloc returned zero!\n");
 
 		return -ENOMEM;
 	}
 
-	buffstate->rp = buffstate->wp = (char *) buffstate->buffer;
+	buffstate->r_off = buffstate->w_off = 0;
 
 	/* unique buffer id based on index into DEVICE_BUFFERS */
 	buffstate->id = ++BUFFER_COUNT;
@@ -225,16 +226,15 @@ static int attach_buffer(struct file *filp, unsigned int buffer_id)
 	CryptoHandle *handle = (CryptoHandle *) filp->private_data;
 	CryptoBuffer *buff = NULL;
 
-	/* down sem */
-	(void) down_interruptible(&buff->sem);
-
 	/* the fd is already attached to a buffer */
 	if (handle->buff != NULL) {
 		return -EOPNOTSUPP;
 	}
 
-	/* walk through buffer list find appropriate buffer */
+	/* down sem */
+	(void) down_interruptible(&buff->sem);
 
+	/* walk through buffer list find appropriate buffer */
 	while ((curr = curr->next) != &DEVICE_BUFFERS) {
 
 		if (((CryptoBuffer *) curr)->id == buffer_id) {
@@ -381,41 +381,51 @@ static int set_crypto_mode(struct file *filp, unsigned long arg)
 {
 
 
-	struct crypto_smode mode;
-	CryptoHandle *handle = (CryptoHandle *) filp->private_data;
+	CryptoHandle *handle;
+	struct crypto_smode* enc_st;
 	unsigned int count = 0;
+	
 
-	if (handle == NULL) {
-		/* should never happen need fd to call function anyway */
+	handle = (CryptoHandle *) filp->private_data;
+
+	/* handle is attached to a buffer so take sem */
+	if( handle->buff != NULL){
+	
+		(void) down_interruptible(&handle->buff->sem);
 	}
 
-	if (copy_from_user(&mode, (void *) arg, sizeof(struct crypto_smode))) {
+	enc_st = (struct crypto_smode*) handle ;
+
+	if (copy_from_user(&enc_st,(void*) arg, sizeof(struct crypto_smode))) {
 		return -EFAULT;
 	}
 
-	if (mode.dir != CRYPTO_READ || mode.dir != CRYPTO_WRITE) {
+	if (enc_st->dir != CRYPTO_READ || enc_st->dir != CRYPTO_WRITE) {
 
 		/* integrity error */
 	}
 
-	if (mode.mode != CRYPTO_DEC || mode.mode != CRYPTO_ENC || mode.mode
-	    != CRYPTO_PASSTHROUGH) {
+	if (enc_st->mode != CRYPTO_DEC || enc_st->mode != CRYPTO_ENC || 
+			enc_st->mode != CRYPTO_PASSTHROUGH) {
 
 		/* integrity error */
 	}
 
-	while (mode.key[count] != '\0' && count < 255) {
+	while (enc_st->key[count] != '\0' && count < 255) {
 		count++;
 	}
 
-	if (mode.key[count] != '\0') {
+	if (enc_st->key[count] != '\0') {
 
 		/* integrity error */
 		/* error key is not null terminated */
 	}
 
-	handle->mode = mode;
-
+	/* handle is attached to a buffer so take sem */
+	if( handle->buff != NULL){
+	
+		up(&handle->buff->sem);
+	}
 	return 0;
 
 }
@@ -448,87 +458,143 @@ int crypto_release(struct inode *inode, struct file *filp)
 ssize_t crypto_read(struct file * filp, char *buf, size_t len, loff_t * off)
 {
 
-	CryptoHandle *handle = (CryptoHandle *) filp->private_data;
-	CryptoBuffer *buff = handle->buff;
-	struct crypto_smode crypto_enc;
-	struct cryptodev_state crypto_state;
-	ssize_t minimum;
+	CryptoHandle *chandle;
+	CryptoBuffer *cbuff;
 
-	/* down sem */
-	(void) down_interruptible(&buff->sem);
+	/* struct cryptodev_state dev_st; */
 
-	crypto_enc = handle->mode;
+	size_t chunk1 = 0;
+	size_t chunk2 = 0;
+	size_t minimum = 0;
+	size_t bytes_read = 0;
 
-	minimum = min(len, (size_t) (buff->wp - buff->rp));
+	chandle = (CryptoHandle *) filp->private_data;
 
-	cryptodev_init(&crypto_state, crypto_enc.key, strlen(crypto_enc.key));
+	cbuff = chandle->buff;
 
 	/* check filp is a reader */
-	if (buff->reader != filp) {
+	if (cbuff->reader != filp) {
+		return -EOPNOTSUPP;
+	}
+
+	/* down sem */
+	(void) down_interruptible(&cbuff->sem);
+/*****************************************************************************/
+
+	chunk1 = CIRC_CNT_TO_END( cbuff->w_off, cbuff->r_off, BUFFSIZE);
+
+	minimum = min( len, chunk1 );
+
+	(void) copy_to_user(buf, (cbuff->start + cbuff->r_off), minimum);
+
+	bytes_read += minimum;
+
+	/* advance r_off should be zero if if len > chunk1*/
+	cbuff->r_off = (cbuff->r_off + bytes_read) & (BUFFSIZE - 1);
+
+
+	/* Read Wrap
+	 *
+	 * ---First copy_to_user
+	 *
+	 *  -chunk2-                -chhunk1-
+	 *  ---------------------------------
+	 *  | c | d |               | a | b |
+	 *  --------^---------------^--------
+	 *   	   w_off           r_off 
+	 *
+	 * ---Second copy_to_user
+	 *
+	 *  -chunk2-
+	 *  ---------------------------------
+	 *  | c | d |                       |
+	 *  ^-------^------------------------
+	 * r_off   w_off 
+	 *
+	 */
+
+	if( len > bytes_read ){
+
+		chunk2 = CIRC_CNT(cbuff->w_off,cbuff->r_off, BUFFSIZE);
+
+		minimum = min( len - bytes_read, chunk2 ); 
+		
+		(void) copy_to_user(&buf[bytes_read], 
+				(cbuff->start + cbuff->r_off), minimum);
+
+		bytes_read += minimum;
+
+		/* advance r_off */
+		cbuff->r_off = (cbuff->r_off + minimum) & (BUFFSIZE - 1);
 
 	}
 
-	switch (crypto_enc.mode) {
 
-	case CRYPTO_READ:
+/*****************************************************************************/
+	up(&cbuff->sem);
 
-	case CRYPTO_WRITE:
-
-	default:
-		break;
-
-	}
-
-	switch (crypto_enc.dir) {
-
-	case CRYPTO_ENC:
-
-	case CRYPTO_DEC:
-
-	case CRYPTO_PASSTHROUGH:
-
-	default:
-		break;
-
-	}
-
-	if (copy_to_user(buf, buff->rp, minimum)) {
-		/* error not all data copied */
-	}
-
-	/* TODO implement circular buffer */
-	buff->rp += minimum;
-
-	/* up sem */
-	up(&buff->sem);
-
-	return minimum;
+	return bytes_read;
 }
 
 ssize_t crypto_write(struct file * filp, const char *buf, size_t len,
 		     loff_t * off)
 {
 
-	CryptoHandle *handle = (CryptoHandle *) filp->private_data;
-	CryptoBuffer *buff = handle->buff;
+	CryptoHandle *chandle;
+	CryptoBuffer *cbuff;
+
+	size_t space1 = 0;
+	size_t space2 = 0;
+	size_t minimum = 0;
+	size_t bytes_written = 0;
+
+	chandle = (CryptoHandle *) filp->private_data;
+
+	cbuff = chandle->buff;
+
+	if( cbuff->writer != filp){
+		/* not the writer to this file */
+		return -EOPNOTSUPP;
+	}
 
 	/* down sem */
-	(void) down_interruptible(&buff->sem);
+	(void) down_interruptible(&cbuff->sem);
+/*****************************************************************************/
 
-	/* check filp for attached buffer */
+	space1 = CIRC_SPACE_TO_END( cbuff->w_off, cbuff->r_off, BUFFSIZE);
 
-	/* check filp is a writer */
+	minimum = min( len, space1 );
 
-	/* check mode for encryption */
+	(void) copy_from_user( (void*) (cbuff->start + cbuff->w_off), buf,
+			minimum );
 
-	/* copy from user space and do crypt */
+	bytes_written += minimum;
 
-	/* update read/write pointers */
+	/* advance w_off should be zero if if len > chunk1*/
+	cbuff->w_off = (cbuff->w_off + bytes_written) & (BUFFSIZE - 1);
+
+	if( len > bytes_written ){
+	
+		space2 = CIRC_SPACE(cbuff->w_off, cbuff->r_off, BUFFSIZE);
+	
+		minimum = min ( len - bytes_written , space2 );
+
+		(void) copy_from_user( (void*) (cbuff->start + cbuff->w_off),
+				&buf[bytes_written], minimum );
+
+		bytes_written += minimum;
+
+		/* advance w_off should be zero if if len > chunk1*/
+		cbuff->w_off = (cbuff->w_off + minimum) & (BUFFSIZE - 1);
+		
+	}
+
+/*****************************************************************************/
 
 	/* up sem */
-	up(&buff->sem);
+	up(&cbuff->sem);
 
-	return 0;
+	return bytes_written;
 }
 
 
@@ -565,9 +631,61 @@ int crypto_ioctl(struct inode *inode, struct file *filp, unsigned int cmd,
 	return -ENOTTY;
 }
 
+/* called to map a buffer of kernel memory (len 4096 or 8192) and return a
+ * pointer to the beginning of that buffer.
+ *
+ * the vm_area_struct contains:
+ * - "unsigned long vm_start;" start and end virtual addresses 
+ * - "struct file *vm_file;" a pointer to the file struct associated with the
+ *   area
+ * - "unsigned long vm_pgoff;" the offset of the area in a file. 0 = start of
+ *   file
+ * - "unsigned long vm_page_prot;" RO/WO protection on the memory
+ */
+
 int crypto_mmap(struct file *filp, struct vm_area_struct *vma)
 {
-	return -ENOSYS;
+	
+	CryptoHandle *chandle;
+	CryptoBuffer *cbuff;
+	size_t size;
+
+	chandle = (CryptoHandle *) filp->private_data;
+
+	cbuff = chandle->buff;
+	
+	/* check if flip passed through mmap() is attached to a buffer */
+	if (cbuff == NULL) {
+		/* the handle is not attached to any buffer */
+		return -EOPNOTSUPP;
+	}
+	
+	/* Set read only if write not explicitly declared */
+	if(vma->vm_page_prot != PROT_WRITE) {
+		vma->vm_page_prot = PROT_READ;
+	}
+	
+	/* set start of address range to start of our buffer (assumes page 
+	 * alignment)
+	 */
+	vma->vm_start = cbuff->start;
+	vma->vm_end = 8192UL - vma->vm_pgoff;
+	size = vma->vm_end - vma->vm_start;
+	
+	/* ready to map, do final check of size to ensure alignment*/
+	if(size != 4096 || size != 8192) {
+		return -EIO;
+	}
+	 
+	 /* Build suitable page tables for the address range using
+	  * remap_pfn_range 
+	  */
+	if (remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff, 
+			size, vma->vm_page_prot)) {
+		return -EAGAIN;
+	}
+	
+	return 0;
 }
 
 void init_file_ops(void)

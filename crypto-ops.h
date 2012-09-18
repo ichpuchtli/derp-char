@@ -8,6 +8,11 @@
 #include <linux/semaphore.h>	/* sema_init(), up(), down() */
 #include <linux/list.h>		/* kmalloc, kfree, ... */
 
+#include <linux/mm.h>
+#include <asm-generic/mman-common.h>
+
+#include <linux/circ_buf.h>	/* CIRC_CTN, ... */
+
 #include <asm/uaccess.h>	/* copy_*_user */
 
 #include "ioctl.h"
@@ -21,17 +26,20 @@ struct BufferState {
 	struct file *reader;
 	struct file *writer;
 	struct semaphore sem;
-	const char *buffer;
-	char *rp;		/* tail in circular buffer terms */
-	char *wp;		/* head in circular buffer terms */
+
 	unsigned int id;
 	volatile unsigned int refcount;
+
+	/* Circular Buffer */
+	const char *start;
+	size_t r_off;		/* tail in circular buffer terms */
+	size_t w_off;		/* head in circular buffer terms */
 
 };
 
 struct HandleState {
 
-	struct crypto_smode mode;
+	struct crypto_smode enc_st;
 	struct BufferState *buff;
 };
 
