@@ -20,7 +20,7 @@
 
 extern const struct file_operations fops;
 
-struct BufferState {
+struct CryptoBuffer {
 
 	struct list_head node;
 	struct file *reader;
@@ -28,7 +28,6 @@ struct BufferState {
 	struct semaphore sem;
 
 	unsigned int id;
-	volatile unsigned int refcount;
 
 	/* Circular Buffer */
 	const char *start;
@@ -37,33 +36,29 @@ struct BufferState {
 
 };
 
-struct HandleState {
+struct CryptoHandle {
 
-	struct crypto_smode enc_st;
-	struct BufferState *buff;
+	struct crypto_smode *enc_st;
+	struct CryptoBuffer *buf;
 };
 
 /*
- * File                 -> CryptoHandle -> CryptoBuffer
- * ----------------        --------        ------------
- * | private_data-|------->| mode |        | sem      |
- * | ...          |        | buff-|------->| rp,wp    |
- * | ...          |        --------        | buffer   |
- * ----------------                        | reader   |
- *                                         | id       |
- *                                         | refcount |
- *                                         ------------
+ *File                 -> CryptoHandle -> CryptoBuffer
+ *----------------        --------        ------------
+ *| private_data-|------->| mode |        | sem      |
+ *| ...          |        | buff-|------->| rp,wp    |
+ *| ...          |        --------        | buffer   |
+ *----------------                        | reader   |
+ *                                       | id       |
+ *                                       | refcount |
+ *                                       ------------
  */
-
-
-typedef struct BufferState CryptoBuffer;
-typedef struct HandleState CryptoHandle;
 
 int crypto_open(struct inode *inode, struct file *filp);
 int crypto_release(struct inode *inode, struct file *filp);
-ssize_t crypto_read(struct file *filp, char *buf, size_t len, loff_t * off);
+ssize_t crypto_read(struct file *filp, char *buf, size_t len, loff_t *off);
 ssize_t crypto_write(struct file *filp, const char *buf, size_t len,
-		     loff_t * off);
+		     loff_t *off);
 int crypto_ioctl(struct inode *inode, struct file *filp, unsigned int cmd,
 		 unsigned long arg);
 int crypto_mmap(struct file *filp, struct vm_area_struct *vma);

@@ -11,6 +11,12 @@ make > /dev/null || exit 1
 # Check if module is still loaded and attempt to remove it
 (lsmod | grep crypto > /dev/null) && rmmod $module
 
+# copy module from alternate extension to prevent removal from make clean'ing
+cp ./cryptodev-1.0/cryptodev.ko.module ./cryptodev-1.0/cryptodev.ko
+
+# check if cryptodev.ko is installed
+(lsmod | grep cryptodev > /dev/null) || insmod ./cryptodev-1.0/cryptodev.ko || exit 2
+
 # Install module
 insmod ./$module.ko $* || exit 2
 
